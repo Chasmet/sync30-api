@@ -1,5 +1,0 @@
-flask
-flask-cors
-moviepy
-imageio
-imageio-ffmpeg

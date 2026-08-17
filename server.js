@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const app = express();
 app.use(cors());
@@ -34,6 +35,20 @@ const MAX_VIDEOS_PER_USER = 3;
 const MAX_VIDEO_AGE_HOURS = 24;
 const MAX_VEED_SECONDS = 32;
 
+// TEMPORAIRE : benchmark LatentSync, appelé uniquement par GitHub Actions.
+const LATENTSYNC_BENCHMARK_AUDIENCE = "sync30-latentsync-benchmark";
+const LATENTSYNC_BENCHMARK_SUBJECT =
+  "repo:Chasmet/sync30-api:ref:refs/heads/main";
+const LATENTSYNC_DEMO_VIDEO =
+  "https://raw.githubusercontent.com/bytedance/LatentSync/main/assets/demo1_video.mp4";
+const LATENTSYNC_DEMO_AUDIO =
+  "https://raw.githubusercontent.com/bytedance/LatentSync/main/assets/demo1_audio.wav";
+const GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com";
+const GITHUB_OIDC_JWKS = createRemoteJWKSet(
+  new URL(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`)
+);
+let latentSyncBenchmarkPredictionId = null;
+
 // UTILS
 function getUserId(req) {
   return req.headers["x-user-id"] || "public";
@@ -41,6 +56,38 @@ function getUserId(req) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requireBenchmarkOidc(req, res, next) {
+  try {
+    const authorization = String(req.headers.authorization || "");
+    const token = authorization.startsWith("Bearer ")
+      ? authorization.slice("Bearer ".length)
+      : "";
+
+    if (!token) {
+      return res.status(401).json({ ok: false, error: "Jeton manquant" });
+    }
+
+    const { payload } = await jwtVerify(token, GITHUB_OIDC_JWKS, {
+      issuer: GITHUB_OIDC_ISSUER,
+      audience: LATENTSYNC_BENCHMARK_AUDIENCE,
+      subject: LATENTSYNC_BENCHMARK_SUBJECT
+    });
+
+    if (
+      payload.repository !== "Chasmet/sync30-api" ||
+      payload.ref !== "refs/heads/main" ||
+      payload.event_name !== "push"
+    ) {
+      return res.status(403).json({ ok: false, error: "Workflow non autorisé" });
+    }
+
+    return next();
+  } catch (error) {
+    console.error("LATENTSYNC BENCHMARK AUTH ERROR:", safeMessage(error));
+    return res.status(401).json({ ok: false, error: "Jeton invalide" });
+  }
 }
 
 function buildStoragePath(userId, fileName) {
@@ -335,6 +382,120 @@ app.get("/", (_req, res) => {
     }
   });
 });
+
+// TEMPORAIRE : un unique essai LatentSync avec les médias de démo officiels.
+app.get(
+  "/__latentsync-benchmark/ready",
+  requireBenchmarkOidc,
+  (_req, res) => {
+    return res.json({ ok: true, model: "bytedance/latentsync" });
+  }
+);
+
+app.post(
+  "/__latentsync-benchmark/start",
+  requireBenchmarkOidc,
+  async (_req, res) => {
+    try {
+      if (latentSyncBenchmarkPredictionId) {
+        return res.json({
+          ok: true,
+          reused: true,
+          predictionId: latentSyncBenchmarkPredictionId
+        });
+      }
+
+      const replicateResponse = await fetch(
+        "https://api.replicate.com/v1/models/bytedance/latentsync/predictions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Token ${REPLICATE_API_TOKEN}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            input: {
+              video: LATENTSYNC_DEMO_VIDEO,
+              audio: LATENTSYNC_DEMO_AUDIO,
+              guidance_scale: 2,
+              inference_steps: 20,
+              seed: 1247
+            }
+          })
+        }
+      );
+
+      const prediction = await replicateResponse.json();
+
+      if (!replicateResponse.ok || !prediction?.id) {
+        throw new Error(
+          prediction?.detail ||
+            prediction?.error ||
+            "Impossible de lancer LatentSync"
+        );
+      }
+
+      latentSyncBenchmarkPredictionId = prediction.id;
+      console.log("LATENTSYNC BENCHMARK STARTED:", prediction.id);
+
+      return res.status(202).json({
+        ok: true,
+        predictionId: prediction.id
+      });
+    } catch (error) {
+      console.error("LATENTSYNC BENCHMARK START ERROR:", error);
+      return res.status(502).json({ ok: false, error: safeMessage(error) });
+    }
+  }
+);
+
+app.get(
+  "/__latentsync-benchmark/status/:predictionId",
+  requireBenchmarkOidc,
+  async (req, res) => {
+    try {
+      const predictionId = String(req.params.predictionId || "");
+
+      if (
+        !latentSyncBenchmarkPredictionId ||
+        predictionId !== latentSyncBenchmarkPredictionId
+      ) {
+        return res.status(404).json({ ok: false, error: "Test introuvable" });
+      }
+
+      const replicateResponse = await fetch(
+        `https://api.replicate.com/v1/predictions/${encodeURIComponent(predictionId)}`,
+        {
+          headers: {
+            Authorization: `Token ${REPLICATE_API_TOKEN}`
+          }
+        }
+      );
+      const prediction = await replicateResponse.json();
+
+      if (!replicateResponse.ok) {
+        throw new Error(
+          prediction?.detail || prediction?.error || "Statut Replicate indisponible"
+        );
+      }
+
+      return res.json({
+        ok: true,
+        id: prediction.id,
+        status: prediction.status,
+        output: prediction.output || null,
+        error: prediction.error || null,
+        metrics: prediction.metrics || null,
+        createdAt: prediction.created_at || null,
+        startedAt: prediction.started_at || null,
+        completedAt: prediction.completed_at || null
+      });
+    } catch (error) {
+      console.error("LATENTSYNC BENCHMARK STATUS ERROR:", error);
+      return res.status(502).json({ ok: false, error: safeMessage(error) });
+    }
+  }
+);
 
 // WALLET STATUS
 app.get("/wallet", async (req, res) => {

@@ -1,0 +1,131 @@
+name: Temporary LatentSync benchmark
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  benchmark:
+    if: "${{ github.event.head_commit.message == 'test: benchmark LatentSync once' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      API_BASE_URL: https://sync30-api.onrender.com
+      OIDC_AUDIENCE: sync30-latentsync-benchmark
+
+    steps:
+      - name: Wait for the temporary route
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          get_token() {
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}" \
+              | jq -er '.value'
+          }
+
+          for attempt in $(seq 1 120); do
+            token="$(get_token)"
+            if curl -fsS --max-time 20 \
+              -H "Authorization: Bearer ${token}" \
+              "${API_BASE_URL}/__latentsync-benchmark/ready" \
+              > ready.json; then
+              jq -e '.ok == true' ready.json > /dev/null
+              exit 0
+            fi
+
+            sleep 10
+          done
+
+          echo "The temporary benchmark route was not deployed in time." >&2
+          exit 1
+
+      - name: Run one LatentSync prediction
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          get_token() {
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}" \
+              | jq -er '.value'
+          }
+
+          started_epoch="$(date +%s)"
+          token="$(get_token)"
+          curl -fsS --max-time 30 \
+            -X POST \
+            -H "Authorization: Bearer ${token}" \
+            "${API_BASE_URL}/__latentsync-benchmark/start" \
+            > start.json
+
+          prediction_id="$(jq -er '.predictionId' start.json)"
+
+          for attempt in $(seq 1 120); do
+            token="$(get_token)"
+            curl -fsS --max-time 30 \
+              -H "Authorization: Bearer ${token}" \
+              "${API_BASE_URL}/__latentsync-benchmark/status/${prediction_id}" \
+              > status.json
+
+            status="$(jq -r '.status' status.json)"
+
+            if [ "${status}" = "succeeded" ]; then
+              output_url="$(jq -er '.output | if type == "array" then .[0] else . end' status.json)"
+              curl -fsSL --max-time 180 "${output_url}" -o latentsync-test.mp4
+              completed_epoch="$(date +%s)"
+              elapsed_seconds="$((completed_epoch - started_epoch))"
+
+              jq -n \
+                --arg model "bytedance/latentsync" \
+                --arg predictionId "${prediction_id}" \
+                --argjson elapsedSeconds "${elapsed_seconds}" \
+                --slurpfile status status.json \
+                '{
+                  ok: true,
+                  model: $model,
+                  predictionId: $predictionId,
+                  wallClockSeconds: $elapsedSeconds,
+                  metrics: $status[0].metrics,
+                  createdAt: $status[0].createdAt,
+                  startedAt: $status[0].startedAt,
+                  completedAt: $status[0].completedAt
+                }' > benchmark-result.json
+              exit 0
+            fi
+
+            if [ "${status}" = "failed" ] || [ "${status}" = "canceled" ]; then
+              jq '. + {ok: false}' status.json > benchmark-result.json
+              cat benchmark-result.json >&2
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          jq -n \
+            --arg predictionId "${prediction_id}" \
+            '{ok: false, predictionId: $predictionId, error: "Benchmark timeout"}' \
+            > benchmark-result.json
+          exit 1
+
+      - name: Upload benchmark result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latentsync-benchmark
+          path: |
+            latentsync-test.mp4
+            benchmark-result.json
+            start.json
+            status.json
+          if-no-files-found: warn
+          retention-days: 3

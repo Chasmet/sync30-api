@@ -39,6 +39,8 @@ const MAX_VEED_SECONDS = 32;
 const LATENTSYNC_BENCHMARK_AUDIENCE = "sync30-latentsync-benchmark";
 const LATENTSYNC_BENCHMARK_SUBJECT =
   "repo:Chasmet/sync30-api:ref:refs/heads/main";
+const LATENTSYNC_REPLICATE_VERSION =
+  "637ce1919f807ca20da3a448ddc2743535d2853649574cd52a933120e9b9e293";
 const LATENTSYNC_DEMO_VIDEO =
   "https://raw.githubusercontent.com/bytedance/LatentSync/main/assets/demo1_video.mp4";
 const LATENTSYNC_DEMO_AUDIO =
@@ -406,7 +408,7 @@ app.post(
       }
 
       const replicateResponse = await fetch(
-        "https://api.replicate.com/v1/models/bytedance/latentsync/predictions",
+        "https://api.replicate.com/v1/predictions",
         {
           method: "POST",
           headers: {
@@ -414,6 +416,7 @@ app.post(
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
+            version: LATENTSYNC_REPLICATE_VERSION,
             input: {
               video: LATENTSYNC_DEMO_VIDEO,
               audio: LATENTSYNC_DEMO_AUDIO,
